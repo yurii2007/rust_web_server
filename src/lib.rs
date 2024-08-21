@@ -5,7 +5,7 @@ type Receiver = Arc<Mutex<mpsc::Receiver<Job>>>;
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>,
+    sender: Option<mpsc::Sender<Job>>,
 }
 
 impl ThreadPool {
@@ -29,33 +29,55 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        ThreadPool { workers, sender }
+        ThreadPool { workers, sender: Some(sender) }
     }
 
     pub fn execute<F>(&self, f: F) where F: FnOnce() + Send + 'static {
         let job = Box::new(f);
 
-        self.sender.send(job).unwrap();
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        for worker in &mut self.workers {
+            println!("Closing worker with id {}", worker.id);
+
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
     }
 }
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<Receiver>,
+    thread: Option<thread::JoinHandle<()>>,
+    // thread: Option<thread::JoinHandle<Receiver>>,
 }
 
 impl Worker {
     fn new(id: usize, receiver: Receiver) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                let job = receiver.lock().unwrap().recv().unwrap();
+                let message = receiver.lock().unwrap().recv();
 
-                println!("worker {id} get a job");
+                match message {
+                    Ok(job) => {
+                        println!("Worker with id {id} got a job");
 
-                job();
+                        job();
+                    }
+                    Err(_) => {
+                        println!("Worker with {id} disconnected");
+                        break;
+                    }
+                }
             }
         });
 
-        Worker { id, thread }
+        Worker { id, thread: Some(thread) }
     }
 }
